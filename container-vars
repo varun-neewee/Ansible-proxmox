@@ -1,0 +1,25 @@
+# vars.yml
+vm_id: 1111
+host_name: brave
+cores: 2
+cpus: 2
+disk: 50
+memory: 2048
+netif: '{"net0":"name=eth0,ip=x.x.x.x/24,gw=x.x.x.x,bridge=vmbr0"}'
+sudo_user: user
+sudo_password: password
+sudo_public_key:
+postgresql_version: 15
+postgres_password: varun
+clamav_cron:
+  minute: "0"
+  hour: "11"
+users:
+      - name: user
+        password: "{{ 'varun' | password_hash('sha512') }}"
+        shell: /bin/bash
+        groups: sudo
+      - name: customer-support
+        password: "{{ 'support' | password_hash('sha512') }}"
+        shell: /bin/bash
+        groups: sudo
