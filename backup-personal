@@ -1,0 +1,25 @@
+- name: Backup and restore
+  hosts: source
+  become: yes
+  vars_files:
+    - vars.yml
+    - secrets.yml
+  tasks:
+    - name: do pg_dump
+      shell: |
+        export PGPASSWORD=varun
+        time pg_dump -U postgres -s --quote-all-identifiers --no-acl -d postgres -f test27_8_aug.sql
+      args:
+        chdir: /home/reddy
+
+#    - name: install zip
+#      command: apt install -y zip
+
+    - name: zip backup file
+      command: zip test27_8_aug.sql.zip test27_8_aug.sql
+
+    - name: do scp
+      expect:
+        command: scp -o StrictHostKeyChecking=no -i /home/reddy/e2e-dev-env test27_8_aug.sql.zip password@x.x.x.x:/home/zv049bemy522/testfolder/
+        responses:
+          "Enter passphrase for key '/home/reddy/e2e-dev-env':": "phassphrase"
