@@ -1,0 +1,5 @@
+[source]
+x.x.x.x ansible_user=user ansible_become_pass=password
+
+[destination]
+x.x.x.x ansible_user=user ansible_become_pass=password
