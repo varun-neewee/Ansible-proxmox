@@ -1,0 +1,5 @@
+[proxmox]
+x.x.x.x ansible_user=user
+
+[vm]
+x.x.x.x ansible_user=user
