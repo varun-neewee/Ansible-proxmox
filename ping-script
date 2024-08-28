@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Define the IP address or hostname of the VM
+VM_IP="<ip>"
+
+# Log file to store the ping results
+LOG_FILE="/var/log/vm_ping.log"
+
+# Function to log messages with timestamp
+log_message() {
+    TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$TIMESTAMP - $1" | tee -a $LOG_FILE
+}
+
+# Ping the VM initially
+ping -c 1 $VM_IP > /tmp/ping_output.txt
+PING_STATUS=$?
+
+if [ $PING_STATUS -eq 0 ]; then
+    log_message "Ping to $VM_IP successful."
+else
+    log_message "Ping to $VM_IP failed. Retrying..."
+
+    # Continue pinging until it succeeds
+    while [ $PING_STATUS -ne 0 ]; do
+        sleep 5
+        ping -c 1 $VM_IP > /tmp/ping_output.txt
+        PING_STATUS=$?
+    done
+
+    log_message "Ping to $VM_IP successful after failure. Running mount -a..."
+    sudo mount -a
+    log_message "mount -a executed successfully."
+fi
+
+# Cleanup
+rm /tmp/ping_output.txt
