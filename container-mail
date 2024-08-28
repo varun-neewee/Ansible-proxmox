@@ -1,0 +1,12 @@
+# tasks/send_email.yml
+- name: Send an email notification
+  mail:
+    host: smtp.office365.com
+    port: 587
+    username: "{{ username }}"
+    password: "{{ password }}"
+    from: "{{ from }}"
+    to: Aniket <aniket.kinekar@neewee.ai>
+    subject: "{{ email_subject }}"
+    body: "{{ email_body }}"
+    secure: starttls
