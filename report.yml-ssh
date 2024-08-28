@@ -1,0 +1,23 @@
+---
+- name: Check SSH access to newly created VM
+  hosts: localhost
+  gather_facts: no
+  vars:
+    host: "x.x.x.x"  # Replace with your VM's IP
+    user: "neewee"         # Replace with your SSH user
+    key: "/home/reddy/.ssh/id_rsa"  # Replace with the path to your private key
+
+  tasks:
+    - name: Check SSH connection
+      shell: "ssh -q -i {{ key }} -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 {{ user }}@{{ host }} 'exit 0'"
+      register: ssh_result
+      ignore_errors: yes
+
+    - name: Print connection status
+      debug:
+        msg: >
+          {% if ssh_result.rc == 0 %}
+            Connection successful
+          {% else %}
+            Connection failed
+          {% endif %}
