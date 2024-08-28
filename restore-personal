@@ -1,0 +1,48 @@
+- name: Restore
+  hosts: destination
+  become: yes
+  vars_files:
+    - vars.yml
+    - secrets.yml
+  tasks:
+    - name: pg_dump
+      shell: |
+        export PGPASSWORD=varun
+        time pg_dump -U postgres -s --quote-all-identifiers --no-acl -d postgres -f test27_aug.sql
+      args:
+        chdir: /home/reddy/personal
+
+    - name: Gather a list of all schemas in the database
+      shell: |
+        export PGPASSWORD=varun
+        psql -U postgres -d testing -t -c "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast');"
+      register: schemas
+
+    - name: Drop each schema
+      shell: |
+        export PGPASSWORD=varun
+        psql -U postgres -d testing -c "DROP SCHEMA IF EXISTS {{ item }} CASCADE;"
+      with_items: "{{ schemas.stdout_lines }}"
+
+    - name: creating public schema
+      shell: |
+        export PGPASSWORD=varun
+        psql -U postgres -d testing -c "CREATE SCHEMA IF NOT EXISTS public;"
+
+
+    - name: do scp
+      expect:
+        command: scp -o StrictHostKeyChecking=no -i /home/reddy/e2e-dev-env user@x.x.x.x:/home/zv049bemy522/testfolder/test27_8_aug.sql.zip /home/reddy/
+        responses:
+          "Enter passphrase for key '/home/reddy/e2e-dev-env':": "phassphrase"
+
+
+    - name: unzip the file
+      command: unzip test27_8_aug.sql.zip
+
+    - name: restore
+      shell: |
+        export PGPASSWORD=varun
+        psql -p 5432 -U postgres -d testing -f test27_8_aug.sql
+      args:
+        chdir: /home/reddy
