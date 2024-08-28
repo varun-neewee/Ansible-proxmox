@@ -1,0 +1,64 @@
+- name: Deploy Cloud-init VMs with a specific IP
+  hosts: proxmox
+  become: yes
+  vars_files:
+    - vars.yml
+    - secret.yml
+  become: yes
+  tasks:
+    - name: Clone template
+      community.general.proxmox_kvm:
+        node: pve
+        vmid: 111
+        clone: ubuntu-22.02
+        name: "{{ vm_name }}"
+        newid: "{{ newid }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ proxmox_api_host }}"
+        storage: local-zfs
+        timeout: 90
+
+    - name: Set cloud-init IP configuration
+      community.general.proxmox_kvm:
+        node: pve
+        name: "{{ vm_name }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ proxmox_api_host }}"
+        ipconfig:
+          ipconfig0: "ip={{ ip_address }},gw={{ gateway }}"
+        update: yes
+
+    - name: Start VM
+      community.general.proxmox_kvm:
+        node: pve
+        name: "{{ vm_name }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ proxmox_api_host }}"
+        state: started
+
+    - name: Set VM memory
+      shell: qm set {{ newid }} --memory 2144
+      args:
+        executable: /bin/bash
+
+    - name: Set VM cores
+      shell: qm set {{ newid }} --cores 1
+      args:
+        executable: /bin/bash
+
+    - name: Stop
+      shell: qm stop {{ newid }}
+      args:
+        executable: /bin/bash
+
+    - name: Wait for 10 seconds after starting the VM
+      pause:
+        seconds: 10
+
+    - name: Start
+      shell: qm start {{ newid }}
+      args:
+        executable: /bin/bash
