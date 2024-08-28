@@ -1,0 +1,411 @@
+---
+- name: Create new LXC container in Proxmox
+  hosts: proxmox
+  become: yes
+  vars_files:
+    - vars.yml
+    - secrets.yml
+  tasks:
+    - name: 'Create LXC Container'
+      community.general.proxmox:
+          vmid: "{{ vm_id }}"
+          api_user: "{{ proxmox_api_user }}"
+          api_password: "{{ proxmox_api_password }}"
+          api_host: "{{ proxmox_api_host }}"
+          hostname: "{{ host_name }}"
+          node: 'pve' # Name of Proxmox host
+          cores: "{{ cores }}"
+          cpus: "{{ cpus }}"
+          cpuunits: '1000'
+          ostemplate: 'local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst' # Or use local:vztmpl/...
+          storage: 'local-zfs' # Or use 'local'
+          disk: "{{ disk }}"
+          memory: "{{ memory }}"
+          onboot: yes
+          nameserver: '8.8.8.8'
+          netif: "{{ netif }}"
+          state: 'present'
+
+    - name: Wait for the container to be ready
+      pause:
+        seconds: 15
+
+    - name: Start CT
+      community.general.proxmox:
+        node: pve
+        hostname: "{{ host_name }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_password: "{{ proxmox_api_password }}"
+        api_host: "{{ proxmox_api_host }}"
+        state: started
+
+    - name: Wait for the container to be ready
+      pause:
+        seconds: 30
+
+    - name: Create sudo user inside the container
+      ansible.builtin.command:
+        cmd: |
+          pct exec {{ vm_id }} -- bash -c "
+          useradd -m -s /bin/bash {{ sudo_user }}
+          echo '{{ sudo_user }}:{{ sudo_password }}' | chpasswd
+          usermod -aG sudo {{ sudo_user }}
+          mkdir -p /home/{{ sudo_user }}/.ssh
+          echo '{{ sudo_public_key }}' > /home/{{ sudo_user }}/.ssh/authorized_keys
+          chown -R {{ sudo_user }}:{{ sudo_user }} /home/{{ sudo_user }}/.ssh
+          chmod 700 /home/{{ sudo_user }}/.ssh
+          chmod 600 /home/{{ sudo_user }}/.ssh/authorized_keys
+          "
+
+    - name: Wait for 60 seconds after starting the VM
+      pause:
+        seconds: 60
+
+- name: Configure and install services on the newly created CT
+  hosts: ct
+  become: yes
+  vars_files:
+    - vars.yml
+    - secrets.yml
+
+  pre_tasks:
+    - name: Parse netif JSON
+      set_fact:
+        netif_dict: "{{ netif | from_json }}"
+
+    - name: Extract IP address from netif
+      set_fact:
+        ip_address: "{{ netif_dict.net0.split(',')[1].split('=')[1] }}"
+      when: netif_dict.net0 is defined
+
+  tasks:
+    - block:
+        - name: Update apt cache
+          command: sudo apt-get update
+
+        - name: Install ClamAV and ClamAV daemon
+          apt:
+            name:
+              - clamav
+              - clamav-daemon
+            state: present
+
+        - name: Enable and start ClamAV daemon service
+          systemd:
+            name: clamav-daemon
+            enabled: yes
+            state: started
+
+        - name: Restart ClamAV service
+          systemd:
+            name: clamav-daemon
+            state: restarted
+
+        - name: Update apt cache
+          command: sudo apt-get update
+
+        - name: Install zabbix-agent repo
+          command: wget https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.0-4+ubuntu22.04_all.deb
+
+        - name: Ensure
+          command: dpkg -i zabbix-release_6.0-4+ubuntu22.04_all.deb
+
+        - name: Update apt cache
+          command: apt update
+
+        - name: Install Zabbix agent
+          command: sudo apt install zabbix-agent2 zabbix-agent2-plugin-*
+
+        - name: Restart Zabbix agent
+          command: systemctl restart zabbix-agent2
+
+        - name: Enable Zabbix agent
+          command: systemctl enable zabbix-agent2
+
+        - name: Wait for 15 seconds
+          pause:
+            seconds: 15
+
+        - name: Add Wazuh repository GPG key
+          command: apt-get install -y gpg
+
+        - name: Add Wazuh repository GPG key
+          apt_key:
+            url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+            state: present
+
+        - name: Add Wazuh repository
+          apt_repository:
+            repo: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+            state: present
+
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+
+        - name: Install Wazuh agent
+          apt:
+            name: wazuh-agent
+            state: present
+
+        - name: Configure Wazuh agent
+          copy:
+            content: |
+              <ossec_config>
+                <client>
+                  <server>
+                    <address>{{ wazuh_manager_ip }}</address>
+                    <port>1514</port>
+                    <protocol>udp</protocol>
+                  </server>
+                </client>
+                <localfile>
+                  <log_format>syslog</log_format>
+                  <location>/var/log/syslog</location>
+                </localfile>
+                <localfile>
+                  <log_format>apache</log_format>
+                  <location>/var/log/apache2/access.log</location>
+                </localfile>
+              </ossec_config>
+            dest: /var/ossec/etc/ossec.conf
+            owner: root
+            mode: '0640'
+          notify:
+            - restart wazuh-agent
+
+        - name: Enable Wazuh agent service to start on boot
+          systemd:
+            name: wazuh-agent
+            enabled: yes
+
+        - name: Update apt cache
+          apt: update_cache=yes
+
+        - name: Add the PostgreSQL APT key
+          apt_key:
+            url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+            state: present
+
+        - name: Add the PostgreSQL APT repositories
+          apt_repository:
+            repo: deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main
+            state: present
+
+        - name: Update apt cache
+          apt: update_cache=yes
+
+        - name: Install PostgreSQL
+          apt:
+            name: postgresql-{{ postgresql_version }}
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+        - name: Set password for the default PostgreSQL user
+          command: sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ postgres_password }}';"
+          ignore_errors: yes
+
+        - name: Set listen_addresses to '*'
+          lineinfile:
+            path: /etc/postgresql/15/main/postgresql.conf
+            regexp: '^#?listen_addresses = '
+            line: "listen_addresses = '*'"
+            state: present
+
+        - name: Allow connections from all IP addresses
+          lineinfile:
+            path: /etc/postgresql/15/main/pg_hba.conf
+            line: "hostssl    all             all            172.20.0.0/16         md5             clientcert=verify-ca"
+            state: present
+
+        - name: Restart PostgreSQL
+          service:
+            name: postgresql
+            state: restarted
+
+        - name: create directory
+          file:
+            path: /etc/postgresql/ssl
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: '0700'
+
+        - name: Generate CA private key and CSR
+          shell: |
+            openssl req -new -days 365 -nodes -text -out ca.csr -keyout ca-key.pem -subj "/CN=certificate-authority"
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Generate CA certificate
+          shell: |
+            openssl x509 -days 365 -req -in ca.csr -text -extfile /etc/ssl/openssl.cnf -extensions v3_ca -signkey ca-key.pem -out ca-cert.pem
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Generate server private key and CSR
+          shell: |
+            openssl req -days 365 -new -nodes -text -out server.csr -keyout server-key.pem -subj "/CN=pg-server"
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Generate server certificate
+          shell: |
+            openssl x509 -days 365 -req -in server.csr -text -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out server-cert.pem
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Generate client private key and CSR
+          shell: |
+            openssl req -new -days 365 -nodes -text -out client.csr -keyout client-key.pem -subj "/CN=pg-client"
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Generate client certificate
+          shell: |
+            openssl x509 -days 365 -req -in client.csr -text -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out client-cert.pem
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Convert client private key to PKCS#8 format
+          shell: |
+            openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt -in client-key.pem -out postgresql-2.pk8
+          args:
+            chdir: /etc/postgresql/ssl
+
+        - name: Set ownership and permissions on generated files
+          file:
+            path: /etc/postgresql/ssl/{{ item }}
+            owner: postgres
+            group: postgres
+            mode: '0600'
+          loop:
+            - ca-key.pem
+            - ca-cert.pem
+            - server-key.pem
+            - server-cert.pem
+            - client-key.pem
+            - client-cert.pem
+            - postgresql-2.pk8
+
+        - name: ssl_ca
+          lineinfile:
+            path: /etc/postgresql/15/main/postgresql.conf
+            regexp: '^#?\s*ssl_ca_file\s*='
+            line: "ssl_ca_file = '/etc/postgresql/ssl/ca-cert.pem'"
+            state: present
+
+        - name: ssl_cert
+          lineinfile:
+            path: /etc/postgresql/15/main/postgresql.conf
+            regexp: '^#?\s*ssl_cert_file\s*='
+            line: "ssl_cert_file = '/etc/postgresql/ssl/server-cert.pem'"
+            state: present
+
+        - name: ssl_cert_key
+          lineinfile:
+            path: /etc/postgresql/15/main/postgresql.conf
+            regexp: '^#?\s*ssl_key_file\s*='
+            line: "ssl_key_file = '/etc/postgresql/ssl/server-key.pem'"
+            state: present
+
+        - name: install zip
+          command: apt install -y zip
+
+        - name: zip ssl certs
+          command: zip ssl-certs.zip /etc/postgresql/ssl/client-key.pem /etc/postgresql/ssl/client-cert.pem /etc/postgresql/ssl/ca-cert.pem
+
+        - name: Send an email with attachments using Outlook SMTP server
+          mail:
+            host: smtp.office365.com
+            port: 587
+            username: "{{ username }}"
+            password: "{{ password }}"
+            from: "{{ from }}"
+            to: aniket <aniket.kinekar@neewee.ai>
+            subject: Ansible Report with Attachments
+            body: Please find the attached files.
+            attach:
+              - /home/reddy/ssl-certs.zip
+            secure: starttls
+
+        - name: Create txt file with paths
+          copy:
+            content: |
+              /var
+              /home
+              /tmp
+              /etc
+              /opt
+              /root
+            dest: /root/ClamScanTheseFolders.txt
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Ensure /opt/scripts directory exists
+          file:
+            path: /opt/scripts
+            state: directory
+            mode: '0755'
+
+        - name: Copy test.py to /opt/scripts
+          copy:
+            src: /home/reddy/container/test.py
+            dest: /opt/scripts/test.py
+            mode: '0755'
+
+        - name: Ensure ClamAV cron job exists
+          cron:
+            name: "ClamAV Scan"
+            minute: "{{ clamav_cron.minute }}"
+            hour: "{{ clamav_cron.hour }}"
+            job: 'clamscan -r -z -i --bell --file-list=/root/ClamScanTheseFolders.txt > /root/clamscan.txt && echo "servername : $(cat /etc/hostname)" >> /root/clamscan.txt && python3 /opt/scripts/test.py'
+            user: root
+
+        - name: Ensure users are present
+          ansible.builtin.user:
+            name: "{{ item.name }}"
+            password: "{{ item.password }}"
+            shell: "{{ item.shell }}"
+            groups: "{{ item.groups }}"
+            state: present
+          loop: "{{ users }}"
+
+#  post_tasks:
+#    - name: Send final email notification
+#      include_tasks: send_email.yml
+
+        - name: Set success email variables
+          set_fact:
+            email_subject: "Ansible Playbook Succeeded"
+            email_body: |
+              The Ansible playbook has successfully completed execution.
+              Hostname: {{ host_name }}
+              IP_Address: {{ ip_address }}
+
+      rescue:
+        - name: Set failure email variables
+          set_fact:
+            email_subject: "Ansible Playbook Failed"
+            email_body: |
+              The Ansible playbook encountered an error. Please check the logs for details.
+              Hostname: {{ host_name }}
+              IP_Address: {{ ip_address }}
+              Error_Message: {{ ansible_failed_result }}
+
+#        - include_tasks: send_email.yml
+
+      always:
+        - name: Send email notification
+          include_tasks: send_email.yml
+
+    - name: Reboot the CT
+      reboot:
+
+  handlers:
+    - name: restart wazuh-agent
+      systemd:
+        name: wazuh-agent
+        state: restarted
