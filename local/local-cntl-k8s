@@ -1,0 +1,277 @@
+- name: Setup Kubernetes node
+  hosts: control
+  become: true
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Add entries to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        block: "{{ hosts_lines }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - k8s hosts"
+
+    - name: Disable swap
+      ansible.builtin.command: swapoff -a
+
+    - name: Disable SWAP in fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^.*swap.*$'
+        line: '#\0'
+        backrefs: yes
+
+    - name: add mnt to fstab
+      copy:
+        dest: /etc/fstab
+        content: |
+          172.20.10.77:/mnt/nfs_share  /localnfs  nfs  defaults  0  0
+
+    - name: Set up cron job
+      ansible.builtin.cron:
+        name: "Run custom script"
+        job: "{{ cron_command }}"
+        user: root
+
+    - name: update
+      command: apt-get update
+
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+        update_cache: yes
+
+    - name: Load required kernel modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Load overlay module
+      modprobe:
+        name: overlay
+        state: present
+
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Set sysctl params for Kubernetes
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward = 1
+
+    - name: Apply sysctl params
+      command: sysctl --system
+
+    - name: Install containerd
+      shell: |
+        cd /usr/local
+        sudo wget https://github.com/containerd/containerd/releases/download/v2.0.0/containerd-2.0.0-linux-amd64.tar.gz
+        sudo tar Cxzvf /usr/local containerd-2.0.0-linux-amd64.tar.gz
+        mkdir -p /usr/local/lib/systemd/system/
+        cd /usr/local/lib/systemd/system/
+        sudo wget https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+        mkdir -p /etc/containerd/
+        containerd config default | tee /etc/containerd/config.toml
+
+    - name: config.toml
+      copy:
+        src: /home/varun/local-cntl-k8s/config.toml
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+
+    - name: containerd reload
+      shell: |
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now containerd
+        sudo systemctl status containerd -l --no-pager
+
+    - name: Install runc
+      shell: |
+        sudo wget https://github.com/opencontainers/runc/releases/download/v1.2.3/runc.amd64
+        sudo install -m 755 runc.amd64 /usr/local/sbin/runc
+        sudo systemctl restart containerd
+
+    - name: Add Kubernetes apt repository
+      shell: |
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL {{ kube_release_key_url }} | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo '{{ kube_apt_repo }}' | tee /etc/apt/sources.list.d/kubernetes.list
+        apt-get update
+
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Hold Kubernetes components
+      command: sudo apt-mark hold kubelet kubeadm kubectl
+
+    - name: kubeadm init into controller
+      command: sudo kubeadm init --control-plane-endpoint vm-k8s-node-903:6443 --pod-network-cidr 192.168.0.0/16
+
+    - name: Create kube config directory
+      file:
+        path: "{{ ansible_user_dir }}/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Kubernetes admin.conf
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_user_dir }}/.kube/config"
+        remote_src: yes
+
+    - name: Set ownership of kube config
+      file:
+        path: "{{ ansible_user_dir }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Set KUBECONFIG in .bashrc
+      lineinfile:
+        path: "{{ ansible_user_dir }}/.bashrc"
+        line: 'export KUBECONFIG=/etc/kubernetes/admin.conf'
+        state: present
+
+    - name: Source .bashrc and print kube config
+      ansible.builtin.shell: |
+        source ~/.bashrc
+        cat "$HOME/.kube/config"
+      args:
+        executable: /bin/bash
+      register: kube_config_output
+
+    - name: Show kube config output
+      debug:
+        var: kube_config_output.stdout
+
+    - name: creating calico
+      command: mkdir -p /etc/calico/
+
+    - name: Apply tigera-operator manifest
+      shell: |
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
+        sudo wget https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/custom-resources.yaml
+      args:
+        chdir: "/etc/calico"
+
+    - name: Modify custom-resources.yaml
+      copy:
+        src: /home/varun/local-cntl-k8s/custom-resources.yaml
+        dest: "/etc/calico/custom-resources.yaml"
+
+    - name: Apply custom-resources.yaml
+      shell: kubectl create -f /etc/calico/custom-resources.yaml
+
+#    - name: get pods
+#      command: watch kubectl get pods -n calico-system
+
+    - name: Wait for 120 seconds to get pods ready
+      pause:
+        seconds: 120
+
+    - name: Taint control-plane
+      shell: kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+
+    - name: Install Helm
+      shell: |
+        curl -O https://get.helm.sh/helm-v3.16.2-linux-amd64.tar.gz
+        tar xvf helm-v3.16.2-linux-amd64.tar.gz
+        sudo mv linux-amd64/helm /usr/local/bin
+        helm version
+
+    - name: Install ingress-nginx via Helm
+      shell: helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --namespace ingress-nginx --create-namespace
+
+    - name: Install MetalLB via Helm
+      shell: |
+        kubectl create ns metallb
+        kubectl config set-context --current --namespace=metallb
+        helm repo add metallb https://metallb.github.io/metallb
+        helm install metallb metallb/metallb
+
+    - name: Wait for 120 seconds to get nginx pods ready
+      pause:
+        seconds: 120
+
+    - name: Apply MetalLB config
+      copy:
+        src: /home/varun/local-cntl-k8s/values.yaml
+        dest: /home/values.yaml
+      register: metallb_config
+
+    - name: Apply values.yaml for MetalLB
+      shell: kubectl apply -f /home/values.yaml
+
+#    - name: Apply values.yaml for MetalLB
+#      shell: kubectl apply -f /home/values.yaml
+
+    - name: get ingress
+      command: kubectl get svc -n ingress-nginx
+
+    - name: Run kubectl patch for ingress-nginx-controller
+      ansible.builtin.shell: |
+        kubectl patch configmap ingress-nginx-controller -n ingress-nginx --type merge -p '
+        {
+          "data": {
+            "add-base-url": "true",
+            "allow-snippet-annotations": "true",
+            "enable-underscores-in-headers": "true",
+            "gzip-comp-level": "10",
+            "gzip-min-length": "100",
+            "gzip-types": "*",
+            "hsts": "true",
+            "hsts-include-subdomains": "true",
+            "hsts-max-age": "31536000",
+            "hsts-preload": "true",
+            "proxy-body-size": "1024M",
+            "proxy-buffer-size": "128k",
+            "proxy-buffers-number": "128",
+            "proxy-read-timeout": "21600",
+            "proxy-send-timeout": "21600",
+            "ssl-redirect": "true",
+            "use-gzip": "true"
+          },
+          "metadata": {
+            "annotations": {
+              "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"data\":{\"add-base-url\":\"true\",\"allow-snippet-annotations\":\"true\",\"enable-underscores-in-headers\":\"true\",\"gzip-comp-level\":\"6\",\"gzip-min-length\":\"1000\",\"gzip-types\":\"*\",\"hsts\":\"true\",\"hsts-include-subdomains\":\"true\",\"hsts-max-age\":\"31536000\",\"hsts-preload\":\"true\",\"proxy-body-size\":\"1024M\",\"proxy-buffer-size\":\"128k\",\"proxy-buffers-number\":\"128\",\"proxy-read-timeout\":\"21600\",\"proxy-send-timeout\":\"21600\",\"ssl-redirect\":\"true\",\"use-gzip\":\"true\"},\"kind\":\"ConfigMap\",\"metadata\":{\"annotations\":{},\"labels\":{\"app.kubernetes.io/component\":\"controller\",\"app.kubernetes.io/instance\":\"ingress-nginx\",\"app.kubernetes.io/name\":\"ingress-nginx\",\"app.kubernetes.io/part-of\":\"ingress-nginx\",\"app.kubernetes.io/version\":\"1.11.2\"},\"name\":\"ingress-nginx-controller\",\"namespace\":\"ingress-nginx\"}}",
+              "meta.helm.sh/release-name": "ingress-nginx",
+              "meta.helm.sh/release-namespace": "ingress-nginx"
+            }
+          }
+        }'
+
+    - name: config set
+      command: kubectl config set-context --current --namespace=default
+
+    - name: Install step-cli
+      shell: |
+        wget https://dl.smallstep.com/cli/docs-cli-install/latest/step-cli_amd64.deb
+        dpkg -i step-cli_amd64.deb
+        step ca bootstrap --ca-url https://ca.bodhee.com:443 --fingerprint eb0e67b2d05e4fda9cf6531ac1f3dca5b6a48d9796790307970cd7fd274b12a0 --install
+
+
+    - name: Mount NFS
+      shell: |
+        apt update
+        apt install -y nfs-common
+        mkdir -p /localnfs
+        mount 172.20.10.77:/mnt/nfs_share /localnfs
+
+    - name: restart containerd
+      command: systemctl restart containerd kubelet
