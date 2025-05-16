@@ -1,0 +1,12 @@
+hosts_lines: |
+  172.20.16.6 ca.bodhee.com
+  172.20.10.54 registry.bodhee.com
+  172.20.10.40 vm-k8s-node-903
+  172.20.10.56 vm-k8s-node-904
+  172.20.10.57 vm-k8s-node-905
+  172.20.10.58 vm-k8s-node-907
+  172.20.10.40 kubernetes.default.svc.cluster.local
+cron_command: "@reboot sleep 10 && echo '{{ hosts_lines | replace(\"'\", \"'\\\\''\") | replace('\n', '\\n') }}' | sudo -S tee -a /etc/hosts && sudo systemctl restart kubelet containerd"
+kube_release_key_url: https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key
+kube_apt_repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /"
+control_ip: "172.20.10.40"
